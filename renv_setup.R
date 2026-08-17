@@ -1,16 +1,10 @@
 # ============================================================
 # renv_setup.R
 # ============================================================
-# Run this ONCE, yourself, before distributing the repo to trainees.
-# It sets up renv, installs every package the SIM2 pipeline needs, and
+# Run ONCE.
+# It sets up renv, installs every package the simulation pipeline needs, and
 # writes a real renv.lock file (with correct, verified versions/hashes)
 # by actually querying CRAN -- not a hand-written approximation.
-#
-# After running this successfully:
-#   1. Commit renv.lock AND the renv/ folder (renv/activate.R,
-#      renv/settings.json) to the repo.
-#   2. Trainees then only need to run restore_renv.R (see below) --
-#      they do NOT need to run this script.
 #
 # USAGE:
 #   Rscript renv_setup.R
@@ -29,11 +23,7 @@ if (!file.exists("renv.lock")) {
   renv::init(bare = TRUE)
 }
 
-# ── 3. Full package list used across the SIM2 pipeline + course session ──
-# Source of truth -- cross-checked against every library()/::-call in:
-#   ctmle_mc_analysis.R, src/estimators.R, src/utils.R,
-#   aggregate_results.R, make_plots.R, simulate_genotypes_CEU.R,
-#   plus the additional packages requested for the joint EMBL-EBI session.
+# ── 3. Full package list used across the simulation pipeline + course session:
 #
 # CRAN packages (installed via renv::install(name)):
 cran_packages <- c(
