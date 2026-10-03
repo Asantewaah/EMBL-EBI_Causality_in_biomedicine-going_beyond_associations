@@ -14,7 +14,11 @@
 # .final_target, .collab_cv_loss, .ic_inference) live in utils.R.
 
 
-source(file.path(dirname(sys.frame(1)$ofile), "utils.R"))  # single package + helper source; do NOT add library() here
+source("src/utils.R")  # utils.R lives alongside this file under src/; every known
+                        # caller (ctmle_mc_analysis.R, the training notebook, etc.)
+                        # already runs with the working directory set to the repo
+                        # root, so a plain relative path is simpler and more robust
+                        # than introspecting the call stack. Do NOT add library() here.
 
 # 1. C-TMLE1 — Collaborative LASSO (lambda selected by targeted CV)
 

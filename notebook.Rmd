@@ -1,0 +1,259 @@
+---
+title: "Causal Effect Estimation on Genotype Data: GLM, TMLE, and C-TMLE"
+subtitle: "Causality in Biomedicine: Going Beyond Associations (EMBL-EBI, 4-9 Oct 2026)"
+author: "Asantewaa Sarpong & Sjoerd Beentjes"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Purpose
+
+In this notebook we estimate the **average treatment effect (ATE)** of a
+single genetic variant (SNP) on a simulated outcome, using three
+increasingly sophisticated estimators:
+
+1.  **GLM-based ATE**: a plain regression adjustment. Fast, simple, but
+    relies on correctly specifying the outcome model.
+2.  **TMLE** (Targeted Maximum Likelihood Estimation): a doubly-robust,
+    semiparametric estimator that combines flexible outcome and
+    treatment ("propensity") models.
+3.  **C-TMLE** (Collaborative TMLE): builds the propensity model
+    *collaboratively* with the outcome model, rather than fitting it
+    independently, which can help when candidate confounders are highly
+    correlated (as genetic variants often are, due to linkage
+    disequilibrium).
+
+TMLE and C-TMLE here are **this project's own implementations**
+(`src/estimators.R`, `src/utils.R`) , the same code used in the full
+simulation benchmark behind this repository, not the bare CRAN package
+functions. This matters: `estimators.R` builds in cross-fitting and a
+bootstrap-based standard error validated specifically for this genotype
+setting, and it defines its own function literally called `tmle()`,
+which is a different (and the one we actually want) implementation from
+the `tmle` package's own `tmle()`.
+
+We use the `data/geno.csv` genotype matrix from this repository, which
+is **fully synthetic**, no real individuals are involved.
+
+Because the true treatment effect is known by construction in this
+exercise (we define it ourselves, below), you can directly compare each
+estimator's output against the right answer.
+
+```{r source-project-code}
+# Sourcing estimators.R also sources utils.R (see its own source() call at
+# the top of the file) and loads every package both files need internally
+# (glmnet, glm2, caret, tibble, dplyr, tidyr, ggplot2, ctmle) — no separate
+# library() calls needed here.
+source("src/estimators.R")
+```
+
+## 1. Load the data and pick a treatment SNP
+
+```{r load-data}
+geno <- read.csv("data/geno.csv", row.names = 1, check.names = FALSE)
+geno <- as.matrix(geno)
+
+dim(geno)   # samples x SNPs
+```
+
+For this walkthrough we'll treat one SNP as the "treatment" and a small
+set of nearby SNPs as potential confounders. In the full SIM2 study (see
+the project's `data/` and `src/` folders) every one of 9 treatment SNPs
+is tested against \~199 confounders across 200 replicates , here we use
+far fewer of both, purely so each estimator fits in a few seconds during
+the session.
+
+```{r pick-snp}
+treatment_snp    <- colnames(geno)[1]        # first SNP in the matrix
+confounder_snps  <- colnames(geno)[2:21]     # next 20 SNPs as confounders
+
+# Binary treatment: carries >=1 copy of the variant vs. none
+A <- as.numeric(geno[, treatment_snp] > 0)
+
+# IMPORTANT: this project's estimator functions (tmle(), ctmle1(), ...)
+# all expect confounder columns named W1, W2, ... — .W_matrix() in
+# utils.R picks them out with a "^W" regex. Using the raw SNP rsIDs as
+# column names here would cause .W_matrix() to silently find ZERO
+# confounder columns.
+W <- as.data.frame(geno[, confounder_snps])
+colnames(W) <- paste0("W", seq_len(ncol(W)))
+
+table(A)
+```
+
+## 2. Simulate a known-truth outcome
+
+To actually demonstrate GLM's limitations (not just assert them), the
+outcome needs to be something a plain `Y ~ A + W` GLM genuinely cannot
+represent, not just "nonlinear in W", which turns out to barely bias GLM
+at all (see note below). The reliable mechanism is **effect
+modification**: we let the *treatment effect itself* vary with `W4`, a
+confounder in strong LD with (i.e. correlated with) the treatment SNP.
+
+The population-average (marginal) ATE is still exactly **1** by
+construction, we center `W4` so its mean contribution is zero, but no
+single additive coefficient on `A` can capture an effect that genuinely
+differs by subgroup. If you've taken a GLM course, this is the single
+most important failure mode to know: an omitted `A:W` interaction biases
+the ATE whenever the modifying covariate correlates with treatment,
+which is exactly the situation genetic confounders are usually in.
+
+```{r simulate-outcome}
+set.seed(42)
+
+true_ate <- 1
+effect_modifier_strength <- 0.5   # how much the treatment effect varies with W4
+
+# Individual treatment effect varies with W4. Centering W4 keeps the
+# population-average (marginal) ATE at exactly `true_ate`.
+W4_centered <- W$W4 - mean(W$W4)
+individual_effect <- true_ate + effect_modifier_strength * W4_centered
+
+Y <- individual_effect * A +
+  0.5 * W$W1 - 0.3 * W$W2 + 0.2 * W$W3 +
+  rnorm(nrow(W), mean = 0, sd = 1)
+```
+
+> **Note on an earlier version of this DGM:** we originally tried adding
+> interactions among confounders (`W x W`, no treatment involved) to
+> break GLM's linear specification. That turns out not to reliably bias
+> GLM's point estimate, once main effects are controlled for, a
+> properly-scaled `W x W` interaction term ends up nearly uncorrelated
+> with treatment, so GLM's omitted-variable bias from it is small (this
+> was a real, hard-won finding from the full simulation study behind
+> this repo). Effect modification (`A x W`) is the more reliable demo
+> because the omitted term directly involves treatment itself.
+
+Every estimator below is given exactly the same input , a single data
+frame with columns `A`, `W1`...`W20`, and `Y` , matching the format this
+project's pipeline uses throughout (see `ctmle_mc_analysis.R`).
+
+```{r assemble-data}
+data <- data.frame(A = A, W, Y = Y)
+```
+
+## 3. GLM-based ATE
+
+The simplest approach: regress the outcome on treatment and confounders,
+and read off the coefficient on `A`. There's no project-specific GLM
+function for this , it's intentionally just base R's `glm()` , so this
+is the one estimator here that is *not* from `src/estimators.R`.
+
+```{r glm-ate}
+glm_fit <- glm(Y ~ ., data = data, family = "gaussian")
+
+glm_ate <- coef(glm_fit)["A"]
+glm_se  <- summary(glm_fit)$coefficients["A", "Std. Error"]
+
+cat(sprintf("GLM ATE estimate: %.3f (SE: %.3f)\n", glm_ate, glm_se))
+```
+
+**Discussion point:** `Y ~ .` fits one constant coefficient on `A`, it
+cannot represent a treatment effect that varies with `W4`, the way we
+just built into the data. Because `W4` correlates with treatment (strong
+LD with the treatment SNP), this constant-effect assumption produces
+real bias, not just extra noise. And critically: nothing about the GLM
+output above tells you this happened, the model fits "successfully" and
+reports a confident standard error regardless.
+
+## 4. TMLE
+
+TMLE improves on the GLM approach in two ways: it allows flexible,
+cross-fitted models for both the outcome and the propensity score, and
+it "targets" the outcome model to the parameter of interest (the ATE),
+giving an estimator that is **doubly robust** , consistent if *either*
+the outcome model or the propensity model is correctly specified, not
+necessarily both.
+
+We call this project's `tmle()` directly, with its production defaults:
+cross-fitted ("CV") variance estimation, and a targeted bootstrap for
+the standard error (`n_boot = 200` resamples by default , if this feels
+slow on your machine during the session, try `n_boot = 50`).
+
+> **Important, and worth saying out loud to participants:** this
+> project's `tmle()`/`ctmle1()` build their own outcome model the same
+> way GLM does, main effects only, no `A:W4` interaction (see
+> `.make_QX()` in `utils.R`). So they are not automatically immune to
+> the effect-modification bias above. Their protection, if any, comes
+> entirely from TMLE's **doubly-robust** property: consistent if
+> *either* the outcome model or the propensity model is correct, not
+> necessarily both. Whether that actually rescues the estimate here is
+> an empirical question, look at the bias numbers in Section 6, don't
+> assume the answer.
+
+```{r tmle-fit}
+tmle_fit <- tmle(data, alpha = 0.05)
+
+tmle_ate <- tmle_fit$est
+tmle_se  <- tmle_fit$se
+
+cat(sprintf("TMLE ATE estimate: %.3f (95%% CI: %.3f, %.3f)\n",
+            tmle_ate, tmle_fit$ci_lower, tmle_fit$ci_upper))
+```
+
+## 5. C-TMLE
+
+C-TMLE is most useful when candidate confounders are highly correlated
+with each other or with treatment , exactly the situation genetic
+variants are often in, due to linkage disequilibrium. Rather than
+fitting the propensity model independently of the outcome model, C-TMLE
+builds it up collaboratively: here, via a LASSO path over the propensity
+model with the penalty strength chosen by targeted cross-validated loss,
+rather than ordinary predictive CV.
+
+We use `ctmle1()`, this project's primary C-TMLE variant (there are
+several others in `src/estimators.R` , `ctmle0()`, `scalable_ctmle()`,
+the Wang-CTMLE family , each making a different collaborative-selection
+choice; `ctmle1()` is the one used as the main comparison point
+throughout the SIM2 study).
+
+```{r ctmle-fit}
+ctmle_fit <- ctmle1(data, alpha = 0.05)
+
+ctmle_ate <- ctmle_fit$est
+ctmle_se  <- ctmle_fit$se
+
+cat(sprintf("C-TMLE ATE estimate: %.3f (95%% CI: %.3f, %.3f)\n",
+            ctmle_ate, ctmle_fit$ci_lower, ctmle_fit$ci_upper))
+```
+
+## 6. Compare all three
+
+```{r compare}
+results <- data.frame(
+  Method   = c("GLM", "TMLE", "C-TMLE"),
+  Estimate = c(glm_ate, tmle_ate, ctmle_ate),
+  Bias     = c(glm_ate, tmle_ate, ctmle_ate) - true_ate
+)
+
+print(results, row.names = FALSE)
+```
+
+**Discussion questions for participants:**
+
+- How close is each estimate to the true ATE of 1?
+- Which estimator's confidence interval actually contains the true
+  value?
+- What happens if you pick a *different* treatment SNP , particularly
+  one more strongly correlated with its neighbouring confounders? (Try
+  changing `treatment_snp` above to a SNP from later in the matrix and
+  re-running.)
+- The full simulation study behind this repository runs this same
+  comparison across 9 treatment SNPs spanning Strong/Moderate/Minimal
+  linkage disequilibrium, with 200 replicates each, and finds that
+  **confidence interval coverage degrades under strong LD** even when
+  point estimates look reasonable. Why might that be, given what you've
+  just seen GLM, TMLE, and C-TMLE each do differently?
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
