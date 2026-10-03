@@ -46,6 +46,15 @@ Because the true treatment effect is known by construction in this
 exercise (we define it ourselves, below), you can directly compare each
 estimator's output against the right answer.
 
+A single estimate and CI only gets you so far, though: a 95% CI either
+happens to contain the truth on one dataset or it doesn't, and that
+alone tells you almost nothing about whether the CI *method* is
+trustworthy. So after comparing the three estimators once (Section 6),
+we re-simulate the outcome several times and check **empirical
+coverage**: across repeated simulated datasets, how often does each
+estimator's stated 95% CI actually contain the true ATE? That's the real
+content of "quantifying uncertainty in simulations" (Section 7).
+
 ```{r source-project-code}
 # Sourcing estimators.R also sources utils.R (see its own source() call at
 # the top of the file) and loads every package both files need internally
@@ -224,7 +233,7 @@ cat(sprintf("C-TMLE ATE estimate: %.3f (95%% CI: %.3f, %.3f)\n",
             ctmle_ate, ctmle_fit$ci_lower, ctmle_fit$ci_upper))
 ```
 
-## 6. Compare all three
+## 6. Compare all three (single simulated dataset)
 
 ```{r compare}
 results <- data.frame(
@@ -236,21 +245,121 @@ results <- data.frame(
 print(results, row.names = FALSE)
 ```
 
+**Quick check before moving on:** how close is each estimate to the true
+ATE of 1, and does each CI actually contain it? Keep this one run in
+mind as you look at the next section, since it's just a single sample
+from the distribution of possible outcomes you're about to generate.
+
+## 7. Quantifying uncertainty: coverage across repeated simulations
+
+A stated "95% CI" is a claim about long-run behaviour: *if we repeated
+this experiment many times, 95% of the resulting intervals would contain
+the true value.* We can actually check that claim here, because we know
+the true ATE by construction. We re-simulate the outcome `n_reps` times
+(same genotypes `A`/`W`, fresh random noise each time), refit all three
+estimators on each simulated dataset, and tally how often each one's CI
+contains the true ATE of 1.
+
+> **Timing note (read before running live):** `n_boot_mc` below is set
+> well below the `tmle()`/`ctmle1()` production default of 200, to keep
+> this loop fast enough for a live session. Time this cell yourself
+> before the practical and adjust `n_reps`/`n_boot_mc` to fit your slot,
+> we couldn't benchmark exact runtime in advance.
+
+```{r monte-carlo-setup}
+n_reps    <- 15   # number of simulated datasets
+n_boot_mc <- 30    # bootstrap resamples per TMLE/C-TMLE fit (production default: 200)
+
+run_one_replicate <- function(rep_id) {
+  set.seed(1000 + rep_id)
+
+  W4_centered <- W$W4 - mean(W$W4)
+  individual_effect <- true_ate + effect_modifier_strength * W4_centered
+
+  Y_rep <- individual_effect * A +
+    0.5 * W$W1 - 0.3 * W$W2 + 0.2 * W$W3 +
+    rnorm(nrow(W), mean = 0, sd = 1)
+
+  data_rep <- data.frame(A = A, W, Y = Y_rep)
+
+  glm_fit_rep <- glm(Y ~ ., data = data_rep, family = "gaussian")
+  glm_est_rep <- unname(coef(glm_fit_rep)["A"])
+  glm_se_rep  <- summary(glm_fit_rep)$coefficients["A", "Std. Error"]
+  glm_ci_rep  <- glm_est_rep + c(-1, 1) * 1.96 * glm_se_rep
+
+  tmle_fit_rep  <- tmle(data_rep, alpha = 0.05, n_boot = n_boot_mc)
+  ctmle_fit_rep <- ctmle1(data_rep, alpha = 0.05, n_boot = n_boot_mc)
+
+  data.frame(
+    rep      = rep_id,
+    Method   = c("GLM", "TMLE", "C-TMLE"),
+    Estimate = c(glm_est_rep, tmle_fit_rep$est, ctmle_fit_rep$est),
+    CI_Lower = c(glm_ci_rep[1], tmle_fit_rep$ci_lower, ctmle_fit_rep$ci_lower),
+    CI_Upper = c(glm_ci_rep[2], tmle_fit_rep$ci_upper, ctmle_fit_rep$ci_upper)
+  )
+}
+```
+
+```{r monte-carlo-run}
+mc_results <- do.call(rbind, lapply(seq_len(n_reps), run_one_replicate))
+
+mc_results <- mc_results %>%
+  mutate(
+    bias   = Estimate - true_ate,
+    covers = CI_Lower <= true_ate & CI_Upper >= true_ate
+  )
+```
+
+```{r coverage-summary}
+coverage_summary <- mc_results %>%
+  group_by(Method) %>%
+  summarise(
+    mean_estimate       = mean(Estimate),
+    mean_bias           = mean(bias),
+    empirical_coverage  = mean(covers),
+    .groups = "drop"
+  )
+
+print(coverage_summary, n = Inf)
+```
+
+```{r coverage-plot, fig.height=5, fig.width=8}
+ggplot(mc_results, aes(x = Estimate, y = rep, xmin = CI_Lower, xmax = CI_Upper,
+                       colour = covers)) +
+  geom_pointrange() +
+  geom_vline(xintercept = true_ate, linetype = "dashed", colour = "black") +
+  facet_wrap(~ Method) +
+  scale_colour_manual(values = c(`TRUE` = "steelblue", `FALSE` = "firebrick"),
+                      name = "CI contains truth") +
+  labs(
+    title    = sprintf("95%% CIs across %d simulated datasets", n_reps),
+    subtitle = "Dashed line = true ATE",
+    x = "ATE estimate", y = "Replicate"
+  ) +
+  theme_minimal()
+```
+
 **Discussion questions for participants:**
 
-- How close is each estimate to the true ATE of 1?
-- Which estimator's confidence interval actually contains the true
-  value?
-- What happens if you pick a *different* treatment SNP , particularly
-  one more strongly correlated with its neighbouring confounders? (Try
-  changing `treatment_snp` above to a SNP from later in the matrix and
-  re-running.)
-- The full simulation study behind this repository runs this same
-  comparison across 9 treatment SNPs spanning Strong/Moderate/Minimal
-  linkage disequilibrium, with 200 replicates each, and finds that
-  **confidence interval coverage degrades under strong LD** even when
-  point estimates look reasonable. Why might that be, given what you've
-  just seen GLM, TMLE, and C-TMLE each do differently?
+- With only `r n_reps` replicates, empirical coverage is a noisy
+  estimate of true coverage; would you trust a difference of, say, 73%
+  vs. 87% here as real, or is that within the noise you'd expect from
+  this few replicates? (This is itself worth discussing: how many
+  replicates would you want before trusting a coverage estimate?)
+- Which estimator's empirical coverage came closest to the nominal 95%?
+  Did that match your expectation from the single-dataset comparison in
+  Section 6?
+- What happens if you pick a *different* treatment SNP, particularly one
+  more strongly correlated with its neighbouring confounders? (Try
+  changing `treatment_snp` back in Section 1 to a SNP from later in the
+  matrix, and re-running from there.)
+- The full simulation study behind this repository runs this same kind
+  of comparison across 9 treatment SNPs spanning Strong/Moderate/Minimal
+  linkage disequilibrium, with 200 replicates each (not 15), and finds
+  that **confidence interval coverage degrades under strong LD** even
+  when point estimates look reasonable. Given the mechanism you just
+  built into this notebook's DGM (effect modification correlated with
+  treatment), does that finding make more sense now?
 
 ## Session info
 
