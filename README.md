@@ -5,13 +5,52 @@ going beyond associations"* (4–9 October 2026, EMBL-EBI, Hinxton).
 
 ## Quick start
 
-- **Just need the data?** Go straight to [`data/`](data/) — see below.
+- **Just need the data?** Go straight to [`data/`](data/) - see below.
 - **Setting up the R environment for the session?** See
   [R Environment (renv)](#r-environment-renv) below.
+- **Here for the practical?** See [Practical Notebook](#practical-notebook)
+  below.
+
+## Practical Notebook
+
+[`notebook.Rmd`](notebook.Rmd) is the hands-on material for the
+*"Quantifying uncertainty in simulations"* practical session. It walks
+through estimating a treatment effect on the synthetic genotype data
+three ways; a plain GLM, TMLE, and C-TMLE, compares each against a
+known true effect, and uses a deliberately-misspecified outcome model to
+show where GLM breaks down and where TMLE/C-TMLE's doubly-robust
+property does (and doesn't) help.
+
+TMLE and C-TMLE are called via this project's own implementations in
+[`src/estimators.R`](src/estimators.R) and
+[`src/utils.R`](src/utils.R) : the same code used in the full research
+pipeline this repo is drawn from : not the bare CRAN package functions.
+
+### Running it
+
+1. Make sure packages are installed: `Rscript restore_renv.R` (see
+   [R Environment (renv)](#r-environment-renv) above) if you haven't
+   already.
+2. Open this repository as your working directory, either open it as
+   an RStudio Project (recommended: double-click to open, or
+   `File > Open Project`, and select this folder), or make sure your
+   console's working directory is the repo root before running anything
+   manually.
+3. Open `notebook.Rmd` and click **Knit**, or run
+   `rmarkdown::render("notebook.Rmd")` from the console.
+
+**Why the working directory matters:** every path in the notebook
+(`data/geno.csv`, `source("src/estimators.R")`, etc.) is relative to the
+repo root. If you knit from anywhere else, e.g. a console whose working
+directory has been changed with `setwd()`, or opening `notebook.Rmd`
+loose outside this folder, file-not-found or sourcing errors are the
+usual symptom. Opening the repo as an RStudio Project avoids this
+automatically, since RStudio sets the working directory to the project
+root on open.
 
 ## Data
 
-[`data/geno.csv`](data/geno.csv) — a simulated genotype matrix (samples ×
+[`data/geno.csv`](data/geno.csv) : a simulated genotype matrix (samples ×
 SNPs, 0/1/2-coded allele counts) with CEU-calibrated linkage disequilibrium
 structure.
 
@@ -33,7 +72,7 @@ Rscript restore_renv.R
 ```
 
 This installs the exact package versions recorded in [`renv.lock`](renv.lock)
-into a project-local library — it won't touch or conflict with anything else
+into a project-local library, it won't touch or conflict with anything else
 on your machine. If you're working in RStudio with this repo open as a
 Project, `renv` activates automatically when the project opens; you can run
 `renv::restore()` at the console instead.
